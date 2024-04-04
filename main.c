@@ -54,7 +54,7 @@
  */
 #include <pciutils.h>
 
-#include "cxlstate.h"
+#include "main.h"
 
 /* MACROS ====================================================================*/
 
