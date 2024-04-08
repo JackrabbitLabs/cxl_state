@@ -13,6 +13,12 @@
 
 /* INCLUDES ==================================================================*/
 
+/* gettid()
+ */
+#define _GNU_SOURCE
+
+#include <unistd.h>
+
 /* printf()
  */
 #include <stdio.h>
@@ -58,6 +64,24 @@
 
 /* MACROS ====================================================================*/
 
+#ifdef CXLS_VERBOSE
+ #define INIT 			unsigned step = 0;
+ #define ENTER 					if (cxls_verbosity & CXVB_CALLSTACK) 	printf("%d:%s Enter\n", 			gettid(), __FUNCTION__);
+ #define STEP 			step++; if (cxls_verbosity & CXVB_STEPS) 		printf("%d:%s STEP: %u\n", 			gettid(), __FUNCTION__, step);
+ #define HEX32(m, i)			if (cxls_verbosity & CXVB_STEPS) 		printf("%d:%s STEP: %u %s: 0x%x\n",	gettid(), __FUNCTION__, step, m, i);
+ #define INT32(m, i)			if (cxls_verbosity & CXVB_STEPS) 		printf("%d:%s STEP: %u %s: %d\n",	gettid(), __FUNCTION__, step, m, i);
+ #define EXIT(rc) 				if (cxls_verbosity & CXVB_CALLSTACK) 	printf("%d:%s Exit: %d\n", 			gettid(), __FUNCTION__,rc);
+#else
+ #define INIT 
+ #define ENTER
+ #define STEP
+ #define HEX32(m, i)
+ #define INT32(m, i)
+ #define EXIT(rc)
+#endif // CSE_VERBOSE
+
+#define IFV(u) 					if (cxls_verbosity & u) 
+
 /* ENUMERATIONS ==============================================================*/
 
 /* STRUCTS ===================================================================*/
@@ -66,7 +90,219 @@
 
 /* GLOBAL VARIABLES ==========================================================*/
 
+__u64 cxls_verbosity = 0;
+
 /* FUNCTIONS =================================================================*/
+
+/**
+ * Copy data from a device definition to a port 
+ *
+ * @param p 	struct cxl_port* to fill with data
+ * @param d 	struct cxl_device* to pull the data from
+ * @param dir 	char* for the directory name for mmaped files
+ * 
+ * STEPS:
+ * 1: Copy basic parameters 
+ * 2: Copy PCIe config space to the port
+ * 3: Copy MLD information if present 
+ * 4: Memory Map a file if requested by the device profile 
+ */
+int cxls_connect(struct cxl_port *p, struct cxl_device *d, char *dir)
+{
+	INIT 
+	int rv;
+	unsigned i;
+	char filename[CXLN_FILE_NAME];
+	FILE *fp;
+
+	ENTER
+
+	// Initialize variables
+	rv = 1;
+
+	// Validate Inputs 
+	if (d->name == NULL)
+		goto end;
+
+	STEP // 1: Copy basic parameters 
+    p->dv = d->dv;			
+    p->dt = d->dt;			
+    p->cv = d->cv;			
+	p->ltssm = FMLS_L0;
+	p->lane = 0;
+	p->lane_rev = 0;
+	p->perst = 0;
+	p->pwrctrl = 0;
+	p->ld = 0;
+
+	// If the device definition says this is a rootport then set as an Upstream Port
+	if( d->rootport == 1 )
+		p->state = FMPS_USP;
+	else 
+		p->state = FMPS_DSP;
+
+	// Pick the lower of the two widths
+	if (d->mlw < p->mlw)
+    	p->nlw = d->mlw << 4;
+	else 
+		p->nlw = p->mlw << 4;
+
+	// Pick the lower of the two speeds
+	if (d->mls < p->mls)
+		p->cls = d->mls;
+	else 
+		p->cls = p->mls;
+
+	// Set present bit 
+ 	p->prsnt = 1; 
+
+	STEP // 2: Copy PCIe config space to the port
+	memcpy(p->cfgspace, d->cfgspace, CXLN_CFG_SPACE);
+
+	STEP // 3: Copy MLD information if present 
+	if (d->mld != NULL) 
+	{
+    	p->ld = d->mld->num;
+
+		// Allocate memory for MLD object in the port
+		p->mld = malloc(sizeof(struct cxl_mld));
+
+		// Copy MLD from device definition to port 
+		memcpy(p->mld, d->mld, sizeof(struct cxl_mld));
+
+		for ( i = 0 ; i < d->mld->num ; i++ )
+		{
+			// Allocate memory for each LD pcie config space
+			p->mld->cfgspace[i] = malloc(CXLN_CFG_SPACE);
+			
+			// Copy PCIe config space from device definition to port
+			memcpy(p->mld->cfgspace[i], d->cfgspace, CXLN_CFG_SPACE);
+		}
+	}
+
+	STEP // 4: Memory Map a file if requested by the device profile 
+	if (d->mld != NULL && d->mld->mmap == 1) 
+	{
+		// Prepare filename
+		sprintf(filename, "%s/port%02d", dir, p->ppid);
+
+		// Create file
+		fp = fopen(filename, "w+");
+		if (fp == NULL) {
+			printf("Error: Could not open file: %s\n", filename);
+			goto end;
+		}
+
+		// Truncate file to desired length
+		rv = ftruncate(fileno(fp), p->mld->memory_size);
+		if (rv != 0) {
+			printf("Error: Could not truncate file. Memory Size: 0x%llx errno: %d\n", p->mld->memory_size, errno);
+			goto end;
+		}
+
+		// mmap file
+		p->mld->memspace = mmap(NULL, p->mld->memory_size, PROT_READ | PROT_WRITE, MAP_SHARED, fileno(fp), 0);
+		if (p->mld->memspace == NULL) {
+			printf("Error: Could not mmap the file. errno: %d\n", errno);
+			rv = 1;
+			goto end;
+		}
+
+		// Save the filename to the port mld object 
+		p->mld->file = strdup(filename);
+
+		// Close file 
+		fclose(fp);
+	
+	}
+
+	rv = 0;
+
+end:
+
+	return rv;
+}
+
+/**
+ * Clear / Free data from a port device definition 
+ *
+ * This function essemtially makes it appear as if the device has been removed from the slot
+ *
+ * @param p	struct cxl_port* The port to clear of values
+ *
+ * STEPS:
+ * 1: Clear basic parameters 
+ * 2: Clear PCIe config space 
+ * 3: Free device name 
+ * 4: Unmemmap MLD if present 
+ * 5: Free PCIe cfg space for each ld
+ * 6: Free MLD if present
+ */
+int cxls_disconnect(struct cxl_port *p)
+{
+	INIT
+	int rv;
+	unsigned i;
+
+	ENTER 
+
+	// Initialize variables
+	rv = 1;
+
+	STEP // 1: Clear basic parameters 
+    p->dv = 0;
+    p->dt = 0;			
+    p->cv = 0;			
+    p->nlw = 0;
+	p->cls = 0;
+	p->ltssm = 0;
+	p->lane = 0;
+	p->lane_rev = 0;
+	p->perst = 0; 
+ 	p->prsnt = 0;
+	p->pwrctrl = 0;
+	p->ld = 0;
+
+	STEP // 2: Clear PCIe config space 
+	memset(p->cfgspace, 0, CXLN_CFG_SPACE);
+
+	STEP // 3: Free device name 
+	if (p->device_name != NULL) 
+	{
+		free(p->device_name);
+		p->device_name = NULL;
+	}
+
+	STEP // 4: Unmemmap MLD if present 
+	if (p->mld != NULL && p->mld->memspace != NULL)
+	{
+		msync (p->mld->memspace, p->mld->memory_size, MS_SYNC); 
+		munmap(p->mld->memspace, p->mld->memory_size);
+		p->mld->memspace = NULL;
+	}
+
+	STEP // 5: Free PCIe cfg space for each ld
+	if (p->mld != NULL) 
+	{
+		for ( i = 0 ; i < p->mld->num ; i++ ) {
+			if ( p->mld->cfgspace[i] != NULL ) {
+				free(p->mld->cfgspace[i]);
+				p->mld->cfgspace[i] = NULL;
+			}
+		}
+	}
+
+	STEP // 6: Free MLD if present
+	if (p->mld != NULL) 
+	{
+		free(p->mld);
+		p->mld = NULL;
+	}
+
+	rv = 0;
+
+	return rv;
+}
 
 /**
  * Initialize state object with default values 

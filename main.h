@@ -37,6 +37,16 @@
 
 /* ENUMERATIONS ==============================================================*/
 
+/**
+ * CXLS Verbosity Bit Field (VB)
+ */
+enum _CXVB
+{
+	CXVB_GENERAL	= (0x01 << 0),
+	CXVB_CALLSTACK 	= (0x01 << 1),
+	CXVB_STEPS		= (0x01 << 2)
+};
+
 /* STRUCTS ===================================================================*/
 
 /**
@@ -211,11 +221,16 @@ struct cxl_switch
 
 /* GLOBAL VARIABLES ==========================================================*/
 
+extern __u64 cxls_verbosity;
+
 /* PROTOTYPES ================================================================*/
 
 struct cxl_switch *cxls_init(unsigned ports, unsigned vcss, unsigned vppbs);
-
 void cxls_free 			(struct cxl_switch *s);
+
+int cxls_connect 	(struct cxl_port *p, struct cxl_device *d, char *dir);
+int cxls_disconnect (struct cxl_port *p);
+
 void cxls_prnt 			(struct cxl_switch *s);
 void cxls_prnt_identity	(struct cxl_switch *s, 	unsigned indent);
 void cxls_prnt_devices 	(struct cxl_switch *s);

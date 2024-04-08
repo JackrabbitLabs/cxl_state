@@ -15,7 +15,7 @@
 
 #include <linux/types.h>
 
-#include "cxlstate.h"
+#include "main.h"
 
 /* MACROS ====================================================================*/
 

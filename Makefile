@@ -13,16 +13,16 @@
 # ******************************************************************************
 
 CC=gcc
-CFLAGS= -g3 -O0 -Wall -Wextra
-MACROS=
-INCLUDE_DIR=/usr/local/include
-LIB_DIR=/usr/local/lib
+CFLAGS?= -g3 -O0 -Wall -Wextra
+MACROS?=-D CXLS_VERBOSE
+INCLUDE_DIR?=/usr/local/include
+LIB_DIR?=/usr/local/lib
 INCLUDE_PATH=-I $(INCLUDE_DIR)
 LIB_PATH=-L $(LIB_DIR)
 LIBS=-l fmapi -l arrayutils -l pciutils
 TARGET=cxlstate
 
-all: testbench lib$(TARGET).a
+all: lib$(TARGET).a
 
 testbench: testbench.c main.o 
 	$(CC) $^ $(CFLAGS) $(MACROS) $(INCLUDE_PATH) $(LIB_PATH) $(LIBS) -o $@ 
@@ -43,7 +43,11 @@ install: lib$(TARGET).a
 	sudo cp lib$(TARGET).a $(LIB_DIR)/
 	sudo cp main.h $(INCLUDE_DIR)/$(TARGET).h
 
-.PHONY: all clean doc install
+uninstall:
+	sudo rm $(LIB_DIR)/lib$(TARGET).a
+	sudo rm $(INCLUDE_DIR)/$(TARGET).h
+
+.PHONY: all clean doc install uninstall
 
 # Variables 
 # $^ 	Will expand to be all the sensitivity list
