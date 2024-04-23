@@ -22,6 +22,8 @@
 
 #include <linux/types.h>
 
+#include <pci/pci.h>
+
 /* MACROS ====================================================================*/
 
 #define CXLN_LD 				16
@@ -118,9 +120,7 @@ struct cxl_vcs
 	__u8 state; 					//!< Virtual CXL switch State [FMVS]
 	__u8 uspid; 					//!< USP Physical Port ID
 	__u8 num;						//!< Number of vPPBs
-	
-	//!< Array of pointers to vPPB objects
-	struct cxl_vppb vppbs[CXLN_VPPBS_PER_VCS];	
+	struct cxl_vppb *vppbs;			//!< Array of vPPB objects
 };
 
 /**
@@ -153,6 +153,8 @@ struct cxl_port
 	__u8 *cfgspace;					//!< Buffer representing PCIe config space
 	struct cxl_mld *mld;			//!< State for MLD
 	char *device_name;				//!< Name of device used to populate this port
+
+	struct pci_dev *dev;			//!< Pointer to Physical PCI device, if running in QEMU mode
 };
 
 /**
@@ -215,7 +217,9 @@ struct cxl_switch
     __u8 mls;					//!< Maximum Link Speed [FMMS]
 	char *dir;					//!< Filepath to directory for instantiated memory
 	
-	pthread_mutex_t mtx;	//!< Mutex to control access to this object
+	pthread_mutex_t mtx;	 	//!< Mutex to control access to this object
+
+	struct pci_access *pacc;	//!< Kept so this can be cleaned up at exit
 };
 
 
@@ -226,6 +230,8 @@ extern __u64 cxls_verbosity;
 /* PROTOTYPES ================================================================*/
 
 struct cxl_switch *cxls_init(unsigned ports, unsigned vcss, unsigned vppbs);
+int cxls_init_ports(struct cxl_switch *s, unsigned ports);
+int cxls_init_vcss(struct cxl_switch *s, unsigned vcss, unsigned vppbs);
 void cxls_free 			(struct cxl_switch *s);
 
 int cxls_connect 	(struct cxl_port *p, struct cxl_device *d, char *dir);

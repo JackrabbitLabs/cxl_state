@@ -88,6 +88,9 @@
 
 /* PROTOTYPES ================================================================*/
 
+void cxls_free_ports(struct cxl_switch *s);
+void cxls_free_vcss(struct cxl_switch *s);
+
 /* GLOBAL VARIABLES ==========================================================*/
 
 __u64 cxls_verbosity = 0;
@@ -143,9 +146,9 @@ int cxls_connect(struct cxl_port *p, struct cxl_device *d, char *dir)
 
 	// Pick the lower of the two widths
 	if (d->mlw < p->mlw)
-    	p->nlw = d->mlw << 4;
+    	p->nlw = d->mlw;
 	else 
-		p->nlw = p->mlw << 4;
+		p->nlw = p->mlw;
 
 	// Pick the lower of the two speeds
 	if (d->mls < p->mls)
@@ -318,10 +321,10 @@ int cxls_disconnect(struct cxl_port *p)
  */
 struct cxl_switch *cxls_init(unsigned ports, unsigned vcss, unsigned vppbs)
 {
-	unsigned i;
-	struct cxl_port *p;
-	struct cxl_vcs *v;
+	int rv;
 	struct cxl_switch *s;
+
+	rv = 0;
 
 	// 1: Validate inputs
 	if (ports > CXLN_PORTS)
@@ -347,20 +350,56 @@ struct cxl_switch *cxls_init(unsigned ports, unsigned vcss, unsigned vppbs)
 	s->ssid = 0xe1e2;
 	s->sn = 0xa1a2a3a4a5a6a7a8;
 	s->ingress_port = 1;
-	s->num_ports = ports;
-	s->num_vcss = vcss;
-	s->num_vppbs = vppbs;
 	s->num_decoders = 42;
 
 	// Initialize Mutex
 	pthread_mutex_init(&s->mtx, NULL);
 
 	// 3: Initalize Ports 
+	rv = cxls_init_ports(s, ports);
+	if ( rv != 0 ) 
+		goto end_state; 
+
+	// 4: Initalize VCSs
+	rv = cxls_init_vcss(s, vcss, vppbs / vcss);
+	if ( rv != 0 ) 
+		goto end_ports; 
+
+	goto end;
+
+end_ports:
+
+	free(s->ports);
+	s->ports = NULL;
+
+end_state:
+
+	free(s);
+	s = NULL;
+
+end:
+
+	return s;
+}
+
+int cxls_init_ports(struct cxl_switch *s, unsigned ports)
+{
+	unsigned i;
+	int rv;
+	struct cxl_port *p;
+
+	// Initialize variables 
+	rv = 1;
+
+	// Free existing array if present
+	cxls_free_ports(s);
+
+	// Allocate memory for new array 
 	s->ports = calloc(ports, sizeof(struct cxl_port));
 	if ( s->ports == NULL ) 
 	{
 		errno = ENOMEM;
-		goto end_state; 
+		goto end; 
 	}
 
 	// Set default port values
@@ -384,14 +423,46 @@ struct cxl_switch *cxls_init(unsigned ports, unsigned vcss, unsigned vppbs)
 		p->prsnt 		= 0;
 		p->pwrctrl 		= 0;
    		p->ld 			= 0;
-	}
+		p->cfgspace 	= calloc(1, CXLN_CFG_SPACE);
 
-	// 4: Initalize VCSs
+		if ( p->cfgspace == NULL )
+		{
+			errno = ENOMEM;
+			goto end_cfgspace; 
+		}
+	}
+	s->num_ports = ports;
+
+	rv = 0;
+
+	goto end;
+
+end_cfgspace:
+	
+	cxls_free_ports(s);
+
+end:
+
+	return rv;
+}
+
+int cxls_init_vcss(struct cxl_switch *s, unsigned vcss, unsigned vppbs)
+{
+	unsigned i;
+	int rv; 
+	struct cxl_vcs *v;
+
+	rv = 1;
+
+	// Free existing array if present
+	cxls_free_vcss(s);
+
+	// Allocate memory for new array
 	s->vcss = calloc(vcss, sizeof(struct cxl_vcs));
 	if ( s->vcss == NULL ) 
 	{
 		errno = ENOMEM;
-		goto end_ports; 
+		goto end; 
 	}
 
 	// Set default vcs values
@@ -401,52 +472,26 @@ struct cxl_switch *cxls_init(unsigned ports, unsigned vcss, unsigned vppbs)
 		v->vcsid	= i;
 		v->state	= FMVS_DISABLED;
 		v->uspid	= 0;
-		v->num		= 0;
+		v->num		= vppbs / vcss;
 
-		// Set the vcs->vppb[] array to zero
-		memset(v->vppbs, 0, CXLN_VPPBS_PER_VCS * sizeof(struct cxl_vppb));
-	}
-
- 	// 5: Initalize PCIe config space register
-	for ( i = 0 ; i < ports ; i++ )
-	{
-		s->ports[i].cfgspace = calloc(1, CXLN_CFG_SPACE);
-		if(s->vcss == NULL)
+		// Allocate and zero memory for vppb array 
+		v->vppbs = calloc(v->num, sizeof(struct cxl_vppb));
+		
+		// Set the default status and vppbid in each vppb entry in this vcs 
+		for ( int k = 0 ; k < v->num ; k++ )
 		{
-			errno = ENOMEM;
-			goto end_cfgspace; 
+			v->vppbs[k].vppbid = k;
+			v->vppbs[k].bind_status = FMBS_UNBOUND;
 		}
 	}
+	s->num_vcss = vcss;
+	s->num_vppbs = vppbs;
 
-	goto end;
-
-end_cfgspace:
-
-	for ( i = 0 ; i < ports ; i++ ) 
-	{
-		if( s->ports[i].cfgspace != NULL ) 
-		{
-			free(s->ports[i].cfgspace);
-			s->ports[i].cfgspace = NULL;
-		}
-	}
-
-	free(s->vcss);
-	s->vcss = NULL;
-
-end_ports:
-
-	free(s->ports);
-	s->ports = NULL;
-
-end_state:
-
-	free(s);
-	s = NULL;
+	rv = 0;
 
 end:
 
-	return s;
+	return rv;
 }
 
 /**
@@ -465,8 +510,8 @@ end:
  */ 
 void cxls_free(struct cxl_switch *s)
 {
-	unsigned i, k;
-	struct cxl_port *p;
+	unsigned i;
+	
 	struct cxl_device *d;
 	
 	if (s == NULL) 
@@ -474,6 +519,68 @@ void cxls_free(struct cxl_switch *s)
 	
 	// 1: Destroy mutex
 	pthread_mutex_destroy(&s->mtx);
+
+	cxls_free_ports(s);
+
+	// 6: Free VCSs & vppbs 
+	cxls_free_vcss(s);
+
+	// 8: Free devices
+	if ( s->devices != NULL ) 
+	{
+		for ( i = 0 ; i < s->len_devices ; i++ )
+		{
+			d = &s->devices[i];
+
+			// Free device name string if present 
+			if ( d->name != NULL ) 
+			{
+				free(d->name);
+				d->name = NULL;
+			}
+
+			// Free device pcie config space if present 
+			if ( d->cfgspace != NULL ) 
+			{
+				free(d->cfgspace);
+				d->cfgspace = NULL;
+			}
+
+			// Free device MLD if present 
+			if ( d->mld != NULL) 
+			{
+				free(d->mld);
+				d->mld = NULL;
+			}
+		}
+
+		free(s->devices);
+		s->devices = NULL;
+	}
+	s->len_devices = 0;
+	s->num_devices = 0;
+
+	// 9: Free Switch State
+	if ( s->dir != NULL )
+	{
+		free(s->dir);
+		s->dir = NULL;
+	}
+
+	if (s->pacc != NULL)
+		pci_cleanup(s->pacc);
+
+	free(s);
+	s = NULL;
+}
+
+void cxls_free_ports(struct cxl_switch *s)
+{
+	unsigned i, k;
+	struct cxl_port *p;
+
+	if (s->ports == NULL)
+		return;
 
 	// 2: Free pci config space memory 
 	for ( i = 0 ; i < s->num_ports ; i++ ) 
@@ -533,65 +640,29 @@ void cxls_free(struct cxl_switch *s)
 			p->mld = NULL;
 		}
 	}
-	
-	// 6: Free VCSs
-	if ( s->vcss != NULL )  
-	{
-		free(s->vcss);
-		s->vcss = NULL;
-	}
 
 	// 7: Free Ports
 	if ( s->ports != NULL ) 
 	{
 		free(s->ports);
 		s->ports = NULL;
+		s->num_ports = 0;
 	}
+}
 
-	// 8: Free devices
-	if ( s->devices != NULL ) 
+void cxls_free_vcss(struct cxl_switch *s)
+{
+	unsigned i;
+
+	if ( s->vcss != NULL )  
 	{
-		for ( i = 0 ; i < s->len_devices ; i++ )
-		{
-			d = &s->devices[i];
-
-			// Free device name string if present 
-			if ( d->name != NULL ) 
-			{
-				free(d->name);
-				d->name = NULL;
-			}
-
-			// Free device pcie config space if present 
-			if ( d->cfgspace != NULL ) 
-			{
-				free(d->cfgspace);
-				d->cfgspace = NULL;
-			}
-
-			// Free device MLD if present 
-			if ( d->mld != NULL) 
-			{
-				free(d->mld);
-				d->mld = NULL;
-			}
-		}
-
-		free(s->devices);
-		s->devices = NULL;
+		for ( i = 0 ; i < s->num_vcss ; i++)
+			if (s->vcss[i].vppbs != NULL)
+				free(s->vcss[i].vppbs);
+		free(s->vcss);
+		s->vcss = NULL;
+		s->num_vcss = 0;
 	}
-	s->len_devices = 0;
-	s->num_devices = 0;
-
-	// 9: Free Switch State
-	if ( s->dir != NULL )
-	{
-		free(s->dir);
-		s->dir = NULL;
-	}
-
-	free(s);
-	s = NULL;
 }
 
 /**
